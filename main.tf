@@ -1,99 +1,6 @@
-data "aws_caller_identity" "default" {
-}
+data "aws_caller_identity" "default" {}
 
-data "aws_region" "default" {
-}
-
-resource "aws_s3_bucket" "cache_bucket" {
-  #bridgecrew:skip=BC_AWS_S3_13:Skipping `Enable S3 Bucket Logging` check until bridgecrew will support dynamic blocks (https://github.com/bridgecrewio/checkov/issues/776).
-  #bridgecrew:skip=BC_AWS_S3_14:Skipping `Ensure all data stored in the S3 bucket is securely encrypted at rest` check until bridgecrew will support dynamic blocks (https://github.com/bridgecrewio/checkov/issues/776).
-  #bridgecrew:skip=CKV_AWS_52:Skipping `Ensure S3 bucket has MFA delete enabled` due to issue in terraform (https://github.com/hashicorp/terraform-provider-aws/issues/629).
-  count         = module.this.enabled && local.s3_cache_enabled ? 1 : 0
-  bucket        = local.cache_bucket_name_normalised
-  acl           = "private"
-  force_destroy = true
-  tags          = module.this.tags
-
-  versioning {
-    enabled = var.versioning_enabled
-  }
-
-  dynamic "logging" {
-    for_each = var.access_log_bucket_name != "" ? [1] : []
-    content {
-      target_bucket = var.access_log_bucket_name
-      target_prefix = "logs/${module.this.id}/"
-    }
-  }
-
-  lifecycle_rule {
-    id      = "codebuildcache"
-    enabled = true
-
-    prefix = "/"
-    tags   = module.this.tags
-
-    expiration {
-      days = var.cache_expiration_days
-    }
-  }
-
-  dynamic "server_side_encryption_configuration" {
-    for_each = var.encryption_enabled ? ["true"] : []
-
-    content {
-      rule {
-        apply_server_side_encryption_by_default {
-          sse_algorithm = "AES256"
-        }
-      }
-    }
-  }
-}
-
-resource "random_string" "bucket_prefix" {
-  count   = module.this.enabled ? 1 : 0
-  length  = 12
-  number  = false
-  upper   = false
-  special = false
-  lower   = true
-}
-
-locals {
-  cache_bucket_name = "${module.this.id}${var.cache_bucket_suffix_enabled ? "-${join("", random_string.bucket_prefix.*.result)}" : ""}"
-
-  ## Clean up the bucket name to use only hyphens, and trim its length to 63 characters.
-  ## As per https://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html
-  cache_bucket_name_normalised = substr(
-    join("-", split("_", lower(local.cache_bucket_name))),
-    0,
-    min(length(local.cache_bucket_name), 63),
-  )
-
-  s3_cache_enabled = var.cache_type == "S3"
-
-  ## This is the magic where a map of a list of maps is generated
-  ## and used to conditionally add the cache bucket option to the
-  ## aws_codebuild_project
-  cache_options = {
-    "S3" = {
-      type     = "S3"
-      location = module.this.enabled && local.s3_cache_enabled ? join("", aws_s3_bucket.cache_bucket.*.bucket) : "none"
-
-    },
-    "LOCAL" = {
-      type  = "LOCAL"
-      modes = var.local_cache_modes
-    },
-    "NO_CACHE" = {
-      type = "NO_CACHE"
-    }
-  }
-
-  # Final Map Selected from above
-  cache = local.cache_options[var.cache_type]
-}
+data "aws_region" "default" {}
 
 resource "aws_iam_role" "default" {
   count                 = module.this.enabled ? 1 : 0
@@ -125,15 +32,6 @@ resource "aws_iam_policy" "default" {
   name   = module.this.id
   path   = "/service-role/"
   policy = data.aws_iam_policy_document.combined_permissions.json
-}
-
-resource "aws_iam_policy" "default_cache_bucket" {
-  count = module.this.enabled && local.s3_cache_enabled ? 1 : 0
-
-
-  name   = "${module.this.id}-cache-bucket"
-  path   = "/service-role/"
-  policy = join("", data.aws_iam_policy_document.permissions_cache_bucket.*.json)
 }
 
 data "aws_s3_bucket" "secondary_artifact" {
@@ -251,33 +149,9 @@ data "aws_iam_policy_document" "combined_permissions" {
   ])
 }
 
-data "aws_iam_policy_document" "permissions_cache_bucket" {
-  count = module.this.enabled && local.s3_cache_enabled ? 1 : 0
-  statement {
-    sid = ""
-
-    actions = [
-      "s3:*",
-    ]
-
-    effect = "Allow"
-
-    resources = [
-      join("", aws_s3_bucket.cache_bucket.*.arn),
-      "${join("", aws_s3_bucket.cache_bucket.*.arn)}/*",
-    ]
-  }
-}
-
 resource "aws_iam_role_policy_attachment" "default" {
   count      = module.this.enabled ? 1 : 0
   policy_arn = join("", aws_iam_policy.default.*.arn)
-  role       = join("", aws_iam_role.default.*.id)
-}
-
-resource "aws_iam_role_policy_attachment" "default_cache_bucket" {
-  count      = module.this.enabled && local.s3_cache_enabled ? 1 : 0
-  policy_arn = join("", aws_iam_policy.default_cache_bucket.*.arn)
   role       = join("", aws_iam_role.default.*.id)
 }
 
@@ -331,12 +205,6 @@ resource "aws_codebuild_project" "default" {
       path = "/"
       name = "/"
     }
-  }
-
-  cache {
-    type     = lookup(local.cache, "type", null)
-    location = lookup(local.cache, "location", null)
-    modes    = lookup(local.cache, "modes", null)
   }
 
   environment {
