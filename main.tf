@@ -4,7 +4,7 @@ data "aws_region" "default" {}
 
 resource "aws_iam_role" "default" {
   count                 = module.this.enabled ? 1 : 0
-  name                  = module.this.id
+  name                  = "${module.this.id}-codebuild"
   assume_role_policy    = data.aws_iam_policy_document.role.json
   force_detach_policies = true
   tags                  = module.this.tags
